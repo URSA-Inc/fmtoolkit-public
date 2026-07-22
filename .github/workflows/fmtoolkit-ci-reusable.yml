@@ -28,9 +28,8 @@ on:
         default: 30
 
 permissions:
-  checks: write
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   fmtoolkit-verify:
@@ -149,32 +148,36 @@ jobs:
             try { data = JSON.parse(fs.readFileSync('fmtoolkit_results.json', 'utf8')); } catch(e) {}
             const passed = '${{ steps.fmtoolkit.outcome }}' !== 'failure';
             const EMOJI = { equivalent:'✅', not_equivalent:'❌', inconclusive:'⚠️', skipped:'⬜', error:'🔴' };
-            let summary = '';
+            let body = passed
+              ? '## ✅ FMToolkit — all changed functions verified\n'
+              : '## ❌ FMToolkit found differences — review required\n';
+            let anyChanged = false;
             for (const report of data.results) {
               const changed = (report.results||[]).filter(f=>!['unchanged','added','deleted'].includes(f.status));
               if (!changed.length) continue;
-              summary += `\n### \`${report.file}\`\n`;
+              anyChanged = true;
+              body += `\n### \`${report.file}\`\n`;
               for (const fn of changed) {
                 const e = EMOJI[fn.status]||'⚪';
                 let line = `${e} **${fn.name}** — ${fn.status.replace(/_/g,' ')}`;
                 if (fn.confidence!=null) line+=` (confidence: ${fn.confidence.toFixed(2)})`;
-                summary += line+'\n';
+                body += line+'\n';
                 if (fn.counterexample) {
-                  summary += '```\nCounterexample:\n';
-                  for (const [k,v] of Object.entries(fn.counterexample)) summary+=`  ${k} = ${JSON.stringify(v)}\n`;
-                  summary += '```\n';
+                  body += '```\nCounterexample:\n';
+                  for (const [k,v] of Object.entries(fn.counterexample)) body+=`  ${k} = ${JSON.stringify(v)}\n`;
+                  body += '```\n';
+                }
+                if (fn.skip_reason) body += `  _(skip reason: ${fn.skip_reason})_\n`;
+                if (fn.errors && fn.errors.length) {
+                  for (const err of fn.errors) body += `  _(${err})_\n`;
                 }
               }
             }
-            for (const e of data.errors||[]) summary+=`\n⚠️ ${e}\n`;
-            if (!summary) summary='No functions changed in this PR.';
-            await github.rest.checks.create({
-              owner: context.repo.owner, repo: context.repo.repo,
-              name: 'FMToolkit Verification',
-              head_sha: context.sha, status: 'completed',
-              conclusion: passed ? 'success' : 'failure',
-              output: {
-                title: passed ? 'All changed functions verified' : 'FMToolkit found differences — review required',
-                summary: summary.trim(),
-              },
+            for (const e of data.errors||[]) { body += `\n⚠️ ${e}\n`; anyChanged = true; }
+            if (!anyChanged) body += '\nNo functions changed in this PR.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body.trim(),
             });
