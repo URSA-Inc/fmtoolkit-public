@@ -92,6 +92,7 @@ jobs:
               src_base = r.stdout if r.returncode == 0 else ""
               if not src_base and not src_head:
                   continue
+              print(f"Checking {fp} ...")
               try:
                   resp = requests.post(
                       f"{api_url}/v1/ci",
@@ -106,16 +107,23 @@ jobs:
                       },
                       timeout=timeout + 10,
                   )
-              except (requests.Timeout, requests.RequestException):
+              except (requests.Timeout, requests.RequestException) as e:
+                  print(f"  {fp}: FMToolkit not currently available ({e})")
                   errors.append(f"{fp}: FMToolkit not currently available")
                   continue
               if resp.status_code == 408:
+                  print(f"  {fp}: FMToolkit not currently available (timeout)")
                   errors.append(f"{fp}: FMToolkit not currently available")
                   continue
               if resp.status_code != 200:
+                  print(f"  {fp}: API error {resp.status_code}: {resp.text[:200]}")
                   errors.append(f"{fp}: API error {resp.status_code}: {resp.text[:200]}")
                   continue
-              all_results.append(resp.json())
+              report = resp.json()
+              for fn in report.get("results", []):
+                  print(f"  {fn['name']}: {fn['status']}"
+                        + (f" counterexample={fn['counterexample']}" if fn.get("counterexample") else ""))
+              all_results.append(report)
 
           with open("fmtoolkit_results.json", "w") as f:
               json.dump({"results": all_results, "errors": errors, "policy": policy}, f)
@@ -125,6 +133,9 @@ jobs:
               for fn in report.get("results", []):
                   if policy.get(fn.get("status"), "pass") == "fail":
                       exit_code = 1
+          if errors:
+              print(f"\n{len(errors)} file(s) had errors: {errors}")
+          print(f"\nExiting {exit_code} ({'policy failure' if exit_code else 'success'})")
           sys.exit(exit_code)
           INNEREOF
 
