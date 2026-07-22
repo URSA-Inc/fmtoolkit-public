@@ -1,0 +1,169 @@
+# FMToolkit reusable workflow — called by customer repos via fmtoolkit-ci.yml.
+
+name: FMToolkit Reusable CI
+
+on:
+  workflow_call:
+    secrets:
+      fmtoolkit_api_key:
+        required: true
+    inputs:
+      file_patterns:
+        type: string
+        default: "**/*.py **/*.ts **/*.tsx"
+      on_not_equivalent:
+        type: string
+        default: "fail"
+      on_inconclusive:
+        type: string
+        default: "warn"
+      on_skipped:
+        type: string
+        default: "pass"
+      on_error:
+        type: string
+        default: "warn"
+      timeout:
+        type: number
+        default: 30
+
+permissions:
+  checks: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  fmtoolkit-verify:
+    name: FMToolkit Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@2d756ea4c53f7f6b397767d8723b3a10a9f35bf2 # v44
+        with:
+          files: ${{ inputs.file_patterns }}
+
+      - name: Run FMToolkit verification
+        id: fmtoolkit
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          FMTOOLKIT_API_KEY: ${{ secrets.fmtoolkit_api_key }}
+          ON_NOT_EQUIVALENT: ${{ inputs.on_not_equivalent }}
+          ON_INCONCLUSIVE: ${{ inputs.on_inconclusive }}
+          ON_SKIPPED: ${{ inputs.on_skipped }}
+          ON_ERROR: ${{ inputs.on_error }}
+          TIMEOUT: ${{ inputs.timeout }}
+        run: |
+          pip install requests --quiet
+          python - << 'INNEREOF'
+          import json, os, subprocess, sys, requests
+
+          api_key  = os.environ["FMTOOLKIT_API_KEY"]
+          api_url  = "https://api-ca.ursasecure.com"
+          timeout  = int(os.environ.get("TIMEOUT", "60"))
+          policy = {
+              "not_equivalent": os.environ.get("ON_NOT_EQUIVALENT", "fail"),
+              "inconclusive":   os.environ.get("ON_INCONCLUSIVE",   "warn"),
+              "skipped":        os.environ.get("ON_SKIPPED",        "pass"),
+              "error":          os.environ.get("ON_ERROR",          "warn"),
+          }
+          changed_files = """${{ steps.changed-files.outputs.all_changed_files }}""".split()
+          base_sha = "${{ github.event.pull_request.base.sha || github.event.before }}"
+          head_sha = "${{ github.sha }}"
+          base_ref = "${{ github.event.pull_request.base.ref || 'base' }}"
+
+          all_results, errors = [], []
+          for fp in changed_files:
+              try:
+                  src_head = open(fp).read()
+              except FileNotFoundError:
+                  src_head = ""
+              r = subprocess.run(["git", "show", f"{base_sha}:{fp}"], capture_output=True, text=True)
+              src_base = r.stdout if r.returncode == 0 else ""
+              if not src_base and not src_head:
+                  continue
+              try:
+                  resp = requests.post(
+                      f"{api_url}/v1/ci",
+                      headers={"Authorization": f"Bearer {api_key}"},
+                      json={
+                          "file_path":   fp,
+                          "source_base": src_base,
+                          "source_head": src_head,
+                          "base_ref":    base_ref,
+                          "head_ref":    head_sha[:8],
+                          "config":      {"timeout": timeout},
+                      },
+                      timeout=timeout + 10,
+                  )
+              except (requests.Timeout, requests.RequestException):
+                  errors.append(f"{fp}: FMToolkit not currently available")
+                  continue
+              if resp.status_code == 408:
+                  errors.append(f"{fp}: FMToolkit not currently available")
+                  continue
+              if resp.status_code != 200:
+                  errors.append(f"{fp}: API error {resp.status_code}: {resp.text[:200]}")
+                  continue
+              all_results.append(resp.json())
+
+          with open("fmtoolkit_results.json", "w") as f:
+              json.dump({"results": all_results, "errors": errors, "policy": policy}, f)
+
+          exit_code = 0
+          for report in all_results:
+              for fn in report.get("results", []):
+                  if policy.get(fn.get("status"), "pass") == "fail":
+                      exit_code = 1
+          sys.exit(exit_code)
+          INNEREOF
+
+      - name: Post FMToolkit summary
+        if: always() && steps.changed-files.outputs.any_changed == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            let data = { results: [], errors: [], policy: {} };
+            try { data = JSON.parse(fs.readFileSync('fmtoolkit_results.json', 'utf8')); } catch(e) {}
+            const passed = '${{ steps.fmtoolkit.outcome }}' !== 'failure';
+            const EMOJI = { equivalent:'✅', not_equivalent:'❌', inconclusive:'⚠️', skipped:'⬜', error:'🔴' };
+            let summary = '';
+            for (const report of data.results) {
+              const changed = (report.results||[]).filter(f=>!['unchanged','added','deleted'].includes(f.status));
+              if (!changed.length) continue;
+              summary += `\n### \`${report.file}\`\n`;
+              for (const fn of changed) {
+                const e = EMOJI[fn.status]||'⚪';
+                let line = `${e} **${fn.name}** — ${fn.status.replace(/_/g,' ')}`;
+                if (fn.confidence!=null) line+=` (confidence: ${fn.confidence.toFixed(2)})`;
+                summary += line+'\n';
+                if (fn.counterexample) {
+                  summary += '```\nCounterexample:\n';
+                  for (const [k,v] of Object.entries(fn.counterexample)) summary+=`  ${k} = ${JSON.stringify(v)}\n`;
+                  summary += '```\n';
+                }
+              }
+            }
+            for (const e of data.errors||[]) summary+=`\n⚠️ ${e}\n`;
+            if (!summary) summary='No functions changed in this PR.';
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              name: 'FMToolkit Verification',
+              head_sha: context.sha, status: 'completed',
+              conclusion: passed ? 'success' : 'failure',
+              output: {
+                title: passed ? 'All changed functions verified' : 'FMToolkit found differences — review required',
+                summary: summary.trim(),
+              },
+            });
