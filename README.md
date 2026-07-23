@@ -19,4 +19,3 @@ Public CI artifacts for integrating FMToolkit into your GitHub Actions pipeline.
 
 Edit the `file_patterns` and `on_*` policy fields in your copy of
 `fmtoolkit-ci.yml` to match your codebase and desired strictness.
-# test line, should never actually land on main
