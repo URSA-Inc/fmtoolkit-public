@@ -11,7 +11,7 @@ on:
 
 jobs:
   fmtoolkit:
-    uses: URSA-Inc/fmtoolkit-public/.github/workflows/fmtoolkit-ci-reusable.yml@main
+    uses: URSA-Inc/fmtoolkit-public/.github/workflows/fmtoolkit-ci-reusable.yml@v1
     secrets:
       fmtoolkit_api_key: ${{ secrets.FMTOOLKIT_API_KEY }}
     with:
