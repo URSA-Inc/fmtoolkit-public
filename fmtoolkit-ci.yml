@@ -9,6 +9,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Required: a called reusable workflow can never have more permissions than
+# the caller grants it, regardless of what the reusable workflow itself
+# declares. Without this block, repos using GitHub's restricted default
+# token permissions (read-only contents, nothing else) will fail on the
+# very first run with "workflow is requesting 'pull-requests: write', but
+# is only allowed 'pull-requests: none'" before any job even starts.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   fmtoolkit:
     uses: URSA-Inc/fmtoolkit-public/.github/workflows/fmtoolkit-ci-reusable.yml@v1
@@ -29,3 +39,4 @@ jobs:
 
       # Per-function analysis timeout in seconds
       timeout: 30
+
