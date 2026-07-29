@@ -147,37 +147,67 @@ jobs:
             let data = { results: [], errors: [], policy: {} };
             try { data = JSON.parse(fs.readFileSync('fmtoolkit_results.json', 'utf8')); } catch(e) {}
             const passed = '${{ steps.fmtoolkit.outcome }}' !== 'failure';
-            const EMOJI = { equivalent:'✅', not_equivalent:'❌', inconclusive:'⚠️', skipped:'⬜', error:'🔴' };
+            const EMOJI = { equivalent:'✅', not_equivalent:'❌', inconclusive:'⚠️', skipped:'⬜', error:'🔴', intentional:'✅', timeout:'⚠️' };
             let body = passed
               ? '## ✅ FMToolkit — all changed functions verified\n'
               : '## ❌ FMToolkit found differences — review required\n';
-            let anyChanged = false;
+
             for (const report of data.results) {
-              const changed = (report.results||[]).filter(f=>!['unchanged','added','deleted'].includes(f.status));
-              if (!changed.length) continue;
-              anyChanged = true;
-              body += `\n### \`${report.file}\`\n`;
-              for (const fn of changed) {
-                const e = EMOJI[fn.status]||'⚪';
-                let line = `${e} **${fn.name}** — ${fn.status.replace(/_/g,' ')}`;
-                if (fn.confidence!=null) line+=` (confidence: ${fn.confidence.toFixed(2)})`;
-                body += line+'\n';
-                if (fn.counterexample) {
-                  body += '```\nCounterexample:\n';
-                  for (const [k,v] of Object.entries(fn.counterexample)) body+=`  ${k} = ${JSON.stringify(v)}\n`;
-                  body += '```\n';
-                }
-                if (fn.skip_reason) body += `  _(skip reason: ${fn.skip_reason})_\n`;
-                if (fn.errors && fn.errors.length) {
-                  for (const err of fn.errors) body += `  _(${err})_\n`;
+              const results = report.results || [];
+              const s = report.summary || {};
+              const changed = results.filter(f => !['unchanged', 'added', 'deleted'].includes(f.status));
+
+              body += `\n### \`${report.file}\`\n\n`;
+              body += `New: **${s.added ?? 0}**  ·  Removed: **${s.deleted ?? 0}**  ·  Unchanged: **${s.unchanged ?? 0}**  ·  Changed: **${changed.length}**\n\n`;
+
+              // Breakdown of changed functions, in the order that matters most first.
+              // Only show categories that actually occur, plus the four core ones always.
+              const core = [
+                ['equivalent',     '✅ Equivalent'],
+                ['not_equivalent', '❌ Not equivalent'],
+                ['inconclusive',   '⚠️ Inconclusive'],
+                ['skipped',        '⬜ Not analyzable'],
+              ];
+              const extra = [
+                ['intentional', '✅ Intentional change'],
+                ['timeout',     '⚠️ Timeout'],
+                ['error',       '🔴 Error'],
+              ];
+              const parts = core.map(([k, label]) => `${label}: ${s[k] ?? 0}`);
+              for (const [k, label] of extra) {
+                if (s[k]) parts.push(`${label}: ${s[k]}`);
+              }
+              body += parts.join('  ·  ') + '\n';
+
+              if (changed.length) {
+                body += '\n**Changed functions:**\n\n';
+                for (const fn of changed) {
+                  const e = EMOJI[fn.status] || '⚪';
+                  let line = `${e} **${fn.name}** — ${fn.status.replace(/_/g, ' ')}`;
+                  if (fn.confidence != null) line += ` (confidence: ${fn.confidence.toFixed(2)})`;
+                  body += line + '\n';
+                  if (fn.counterexample) {
+                    body += '```\nCounterexample:\n';
+                    for (const [k, v] of Object.entries(fn.counterexample)) body += `  ${k} = ${JSON.stringify(v)}\n`;
+                    body += '```\n';
+                  }
+                  if (fn.skip_reason) body += `  _(skip reason: ${fn.skip_reason})_\n`;
+                  if (fn.errors && fn.errors.length) {
+                    for (const err of fn.errors) body += `  _(${err})_\n`;
+                  }
                 }
               }
             }
-            for (const e of data.errors||[]) { body += `\n⚠️ ${e}\n`; anyChanged = true; }
-            if (!anyChanged) body += '\nNo functions changed in this PR.';
+
+            for (const e of data.errors || []) body += `\n⚠️ ${e}\n`;
+            if (!data.results.length && !(data.errors || []).length) {
+              body += '\nNo files matched the configured file_patterns in this PR.';
+            }
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: body.trim(),
             });
+
