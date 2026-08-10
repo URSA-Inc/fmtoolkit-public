@@ -1,0 +1,37 @@
+repo: URSA-Inc/fmtoolkit-public
+
+trust: standard
+
+# research/design/build all disabled: each creates a branch as part of its
+# normal flow, and this repo's branch-protection ruleset restricts branch
+# creation on all non-default branches to OrganizationAdmin. A properly
+# narrow-scoped GH_TOKEN for the scheduled agent (Contents/Issues/PRs only,
+# deliberately no Administration) will not be able to bypass that -- so
+# these three modes would silently fail at branch creation regardless of
+# being enabled here. review mode never creates a branch, so it's the only
+# one that functions under a correctly-scoped token. This also matches the
+# actual right level of caution for a repo whose CODEOWNERS file says
+# customers directly trust its CI workflows.
+modes:
+  research:
+    enabled: false
+    write_allowlist: [docs/research/]
+    auto_merge: false
+  design:
+    enabled: false
+    write_allowlist: [docs/design/]
+    auto_merge: false
+  build:
+    enabled: false
+    write_allowlist: [.github/workflows/]
+    auto_merge: false
+  review:
+    enabled: true
+    write_allowlist: []
+    scope: prs-since-last-review
+
+notifications:
+  on_block: true
+
+required_labels: [agent:write-ok]
+excluded_labels: [state:blocked]
