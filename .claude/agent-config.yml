@@ -1,0 +1,27 @@
+repo: URSA-Inc/fmtoolkit-public
+
+trust: standard
+
+modes:
+  research:
+    enabled: true
+    write_allowlist: [docs/research/]
+    auto_merge: false
+  design:
+    enabled: true
+    write_allowlist: [docs/design/]
+    auto_merge: false
+  build:
+    enabled: true
+    write_allowlist: [.github/workflows/]
+    auto_merge: false
+  review:
+    enabled: true
+    write_allowlist: []
+    scope: prs-since-last-review
+
+notifications:
+  on_block: true
+
+required_labels: [agent:write-ok]
+excluded_labels: [state:blocked]
