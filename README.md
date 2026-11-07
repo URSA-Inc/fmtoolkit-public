@@ -19,3 +19,14 @@ Public CI artifacts for integrating FMToolkit into your GitHub Actions pipeline.
 
 Edit the `file_patterns` and `on_*` policy fields in your copy of
 `fmtoolkit-ci.yml` to match your codebase and desired strictness.
+
+## Classes defined in other files
+
+For a changed Python file, the workflow also sends the files of your
+repository that define the base classes of its classes (every base of every
+ancestor) and the classes their fields are annotated with, at both commits,
+so FMToolkit can analyze those classes. It follows the file's imports
+(including relative imports and re-exports through a package's
+`__init__.py`) and finds modules from the repository root or `src/`; a module
+it can't find there is a library and isn't sent. At most 20 files and 1 MB
+are sent per changed file.
