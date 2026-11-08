@@ -67,6 +67,112 @@ jobs:
           python - << 'INNEREOF'
           import json, os, subprocess, sys, requests
 
+          # The files that define the ancestors of a changed file's classes
+          # (every base of every ancestor) and the classes their fields name,
+          # at both commits: the engine analyzes the file with them, so a class
+          # whose base is in another file of the repository isn't declined
+          # (FMT-2.0 #1288). At most 20 files and 1 MB; the engine declines a
+          # class whose ancestry isn't complete in what's sent.
+          import ast as _ast
+
+          _CTX_MAX_FILES, _CTX_MAX_BYTES = 20, 1_000_000
+
+          def _ctx_module(path):
+              p = path.replace("\\", "/")
+              p = p[2:] if p.startswith("./") else p
+              p = p[4:] if p.startswith("src/") else p
+              parts = [s for s in (p[:-3] if p.endswith(".py") else p).split("/") if s]
+              return ".".join(parts[:-1] if parts and parts[-1] == "__init__" else parts)
+
+          def _ctx_file(module):
+              for root in (".", "src"):
+                  base = os.path.join(root, *module.split("."))
+                  for cand in (base + ".py", os.path.join(base, "__init__.py")):
+                      if os.path.isfile(cand):
+                          return os.path.normpath(cand)
+              return None
+
+          def _ctx_absolute(module, level, current, is_pkg):
+              if level == 0:
+                  return module or ""
+              parts = current.split(".")
+              drop = level - 1 if is_pkg else level
+              parts = parts[: len(parts) - drop] if drop <= len(parts) else []
+              return ".".join([*parts, module] if module else parts)
+
+          def _ctx_imports(tree, current, is_pkg):
+              out = {}
+              for s in tree.body:
+                  if isinstance(s, _ast.ImportFrom):
+                      mod = _ctx_absolute(s.module, s.level, current, is_pkg)
+                      for a in s.names:
+                          out[a.asname or a.name] = (mod, a.name)
+                  elif isinstance(s, _ast.Import):
+                      for a in s.names:
+                          out[a.asname or a.name.split(".")[0]] = (a.name if a.asname else a.name.split(".")[0], None)
+              return out
+
+          def _ctx_wanted(src, path):
+              # (module, name) of each class a file's classes inherit or annotate fields with, imported.
+              try:
+                  tree = _ast.parse(src)
+              except SyntaxError:
+                  return set()
+              imports = _ctx_imports(tree, _ctx_module(path), path.endswith("__init__.py"))
+              wanted = set()
+              for cls in [n for n in tree.body if isinstance(n, _ast.ClassDef)]:
+                  exprs = list(cls.bases)
+                  for n in _ast.walk(cls):
+                      if isinstance(n, _ast.AnnAssign):
+                          exprs.append(n.annotation)
+                      elif isinstance(n, _ast.arg) and n.annotation is not None:
+                          exprs.append(n.annotation)
+                  for e in exprs:
+                      for n in _ast.walk(e):
+                          if isinstance(n, _ast.Name) and n.id in imports and imports[n.id][1]:
+                              wanted.add(imports[n.id])
+                          elif (isinstance(n, _ast.Attribute) and isinstance(n.value, _ast.Name)
+                                and n.value.id in imports and imports[n.value.id][1] is None):
+                              wanted.add((imports[n.value.id][0], n.attr))
+              return wanted
+
+          def _ctx_versions(path, base_sha):
+              try:
+                  head = open(path).read()
+              except (FileNotFoundError, UnicodeDecodeError):
+                  head = ""
+              r = subprocess.run(["git", "show", f"{base_sha}:{path}"], capture_output=True, text=True)
+              return (r.stdout if r.returncode == 0 else ""), head
+
+          def _context_files(fp, src_base, src_head, base_sha):
+              todo = list(_ctx_wanted(src_base, fp) | _ctx_wanted(src_head, fp))
+              seen, sent, size = set(), {}, 0
+              while todo:
+                  mod, name = todo.pop()
+                  if (mod, name) in seen:
+                      continue
+                  seen.add((mod, name))
+                  path = _ctx_file(mod)
+                  if path is None or os.path.normpath(path) == os.path.normpath(fp):
+                      continue            # outside the repository (a library), or the file itself
+                  if path not in sent:
+                      vb, vh = _ctx_versions(path, base_sha)
+                      if len(sent) >= _CTX_MAX_FILES or size + len(vb) + len(vh) > _CTX_MAX_BYTES:
+                          continue        # past the cap: the engine declines what this leaves incomplete
+                      sent[path] = {"path": path, "module": _ctx_module(path), "source_base": vb, "source_head": vh}
+                      size += len(vb) + len(vh)
+                  for version in (sent[path]["source_base"], sent[path]["source_head"]):
+                      todo.extend(_ctx_wanted(version, path))
+                      # A re-export (`from .app import App` in a package's __init__) leads on.
+                      try:
+                          tree = _ast.parse(version)
+                      except SyntaxError:
+                          continue
+                      imports = _ctx_imports(tree, _ctx_module(path), path.endswith("__init__.py"))
+                      if name in imports and imports[name][1]:
+                          todo.append(imports[name])
+              return list(sent.values())
+
           api_key  = os.environ["FMTOOLKIT_API_KEY"]
           api_url  = "https://api-ca.ursasecure.com"
           timeout  = int(os.environ.get("TIMEOUT", "60"))
@@ -92,6 +198,8 @@ jobs:
               if not src_base and not src_head:
                   continue
               print(f"Checking {fp} ...")
+              # Python only: the classes a TypeScript file inherits aren't sent yet.
+              ctx = _context_files(fp, src_base, src_head, base_sha) if fp.endswith(".py") else []
               try:
                   resp = requests.post(
                       f"{api_url}/v1/ci",
@@ -103,6 +211,7 @@ jobs:
                           "base_ref":    base_ref,
                           "head_ref":    head_sha[:8],
                           "config":      {"timeout": timeout},
+                          **({"context_files": ctx} if ctx else {}),
                       },
                       timeout=timeout + 10,
                   )
